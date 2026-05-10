@@ -360,7 +360,7 @@ function renderLogin(t,rtl){
       ${[
         {r:'employee',em:'👤',lb:t.emp,ds:t.empD},
         {r:'staff',em:'🛎️',lb:t.staff,ds:t.staffD},
-        {r:'admin',em:'⚙️',lb:t.admin,ds:t.adminD},
+       // {r:'admin',em:'⚙️',lb:t.admin,ds:t.adminD},
       ].map(x=>`
         <div class="role-card" style="margin-bottom:12px" onclick="selectRole('${x.r}')">
           <span style="font-size:36px">${x.em}</span>
