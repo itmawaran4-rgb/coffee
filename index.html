@@ -957,6 +957,11 @@ function exportCSV(){
   a.href=url; a.download='orders-'+todayStr()+'.csv'; a.click();
   URL.revokeObjectURL(url);
 }
+  if ('serviceWorker' in navigator) {
+
+  navigator.serviceWorker.register('/sw.js');
+
+}
 
 // ===== BOOT =====
 loadInitialData();
