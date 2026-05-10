@@ -89,12 +89,12 @@ let state = {
   newEmpName:'', newEmpDept:'', newDeptName:'',
   newOrderCount:0,
   employees:[], depts:[],
-  loading:true,        // تحميل أولي
-  loadingOrders:false, // تحميل الطلبات
-  saving:false,        // حفظ عملية
-  gasError:null,       // رسالة خطأ GAS
-  lastRefresh:null,    // آخر تحديث للطلبات
-  refreshTimer:null,   // مؤقت التحديث التلقائي
+  loading:true,
+  loadingOrders:false,
+  saving:false,
+  gasError:null,
+  lastRefresh:null,
+  refreshTimer:null,
 };
 
 const CHART_VALS = [28,35,42,38,31,45,12];
@@ -206,40 +206,45 @@ function timeSince(ts){
 }
 
 function todayStr(){
-  return new Date().toLocaleDateString('en-CA'); // YYYY-MM-DD
+  return new Date().toLocaleDateString('en-CA');
 }
 
 // ============================================================
-//  GAS COMMUNICATION
+//  GAS COMMUNICATION — كل شيء عبر GET لتجنب مشكلة no-cors
 // ============================================================
 async function gasGet(action, params={}) {
   const url = new URL(GAS_URL);
   url.searchParams.set('action', action);
-  Object.entries(params).forEach(([k,v]) => url.searchParams.set(k, v));
+  Object.entries(params).forEach(([k,v]) => url.searchParams.set(k, String(v)));
   const res = await fetch(url.toString());
   if (!res.ok) throw new Error('HTTP ' + res.status);
-  return res.json();
+  const json = await res.json();
+  if (json && json.error) throw new Error(json.error);
+  return json;
 }
 
-async function gasPost(data) {
-  // GAS يتطلب no-cors + text/plain لتجنب preflight
-  await fetch(GAS_URL, {
-    method: 'POST',
-    mode: 'no-cors',
-    headers: {'Content-Type': 'text/plain;charset=utf-8'},
-    body: JSON.stringify(data)
+// ✅ الإصلاح الأساسي: استخدام GET بدلاً من POST لتجنب مشكلة no-cors مع GAS
+async function gasAction(action, params={}) {
+  const url = new URL(GAS_URL);
+  url.searchParams.set('action', action);
+  Object.entries(params).forEach(([k,v]) => {
+    if (v !== undefined && v !== null) url.searchParams.set(k, String(v));
   });
-  return { ok: true };
+  const res = await fetch(url.toString());
+  if (!res.ok) throw new Error('HTTP ' + res.status);
+  const json = await res.json();
+  if (json && json.error) throw new Error(json.error);
+  return json;
 }
 
 // ============================================================
-//  SESSION — حفظ واستعادة الجلسة عبر localStorage
+//  SESSION
 // ============================================================
 function saveSession() {
   try {
     localStorage.setItem('orderSys_session', JSON.stringify({
-      view:       state.view,
-      user:       state.user,
+      view: state.view,
+      user: state.user,
       loginEmpId: state.loginEmpId
     }));
   } catch(e) {}
@@ -254,10 +259,9 @@ function restoreSession() {
     const raw = localStorage.getItem('orderSys_session');
     if (!raw) return;
     const s = JSON.parse(raw);
-    // تحقق أن المستخدم المحفوظ لا يزال موجوداً في قائمة الموظفين
     if (s.view === 'employee') {
       const emp = state.employees.find(x => String(x.id) === String(s.loginEmpId));
-      if (!emp) return; // الموظف حُذف → ارجع للوجين
+      if (!emp) return;
       state.view       = 'employee';
       state.user       = { ...emp, role: 'employee' };
       state.loginEmpId = s.loginEmpId;
@@ -271,7 +275,6 @@ function restoreSession() {
   } catch(e) {}
 }
 
-// تحميل الموظفين والأقسام عند بدء التطبيق
 async function loadInitialData() {
   state.loading = true;
   state.gasError = null;
@@ -283,44 +286,36 @@ async function loadInitialData() {
     ]);
     if (Array.isArray(emps)) state.employees = emps;
     if (Array.isArray(depts)) state.depts = depts;
-
-    // استعادة الجلسة المحفوظة
     restoreSession();
-
-    // تحميل الطلبات حسب الدور المستعاد
-    if (state.view === 'staff') {
-      state.loading = false;
-      render();
+    state.loading = false;
+    render();
+    if (state.view !== 'login') {
       await loadOrders();
-      startAutoRefresh();
-      return;
-    } else if (state.view === 'employee' || state.view === 'admin') {
-      state.loading = false;
-      render();
-      await loadOrders();
-      return;
+      if (state.view === 'staff') startAutoRefresh();
     }
   } catch(e) {
     console.error('loadInitialData:', e);
     state.gasError = e.message;
+    state.loading = false;
+    render();
   }
-  state.loading = false;
-  render();
 }
 
-// تحميل طلبات اليوم
 async function loadOrders() {
   state.loadingOrders = true;
   render();
   try {
     const orders = await gasGet('getOrders', {date: todayStr()});
     if (Array.isArray(orders)) {
-      // احسب الطلبات الجديدة (pending) التي وصلت حديثاً
       if (state.view === 'staff') {
         const prevPendingIds = new Set(state.orders.filter(o=>o.status==='pending').map(o=>String(o.id)));
         state.orders = orders;
         const newPending = orders.filter(o=>o.status==='pending'&&!prevPendingIds.has(String(o.id)));
-        state.newOrderCount += newPending.length;
+        if (newPending.length > 0) {
+          state.newOrderCount += newPending.length;
+          // إشعار صوتي للـ staff عند وصول طلب جديد
+          playSound(newPending[0].type || 'tea');
+        }
       } else {
         state.orders = orders;
       }
@@ -335,13 +330,13 @@ async function loadOrders() {
   render();
 }
 
-// تحديث تلقائي كل 30 ثانية (للـ staff)
+// تحديث تلقائي كل 15 ثانية (للـ staff) — قلّلنا الوقت لاستجابة أسرع
 function startAutoRefresh() {
   stopAutoRefresh();
   state.refreshTimer = setInterval(() => {
     if (state.view === 'staff') loadOrders();
     else stopAutoRefresh();
-  }, 30000);
+  }, 15000);
 }
 
 function stopAutoRefresh() {
@@ -357,7 +352,6 @@ function render(){
   document.body.className=s.dark?'':'light';
   document.body.style.direction=rtl?'rtl':'ltr';
 
-  // شاشة التحميل الأولي
   if (s.loading) {
     document.getElementById('app').innerHTML = `
       <div class="loading-screen">
@@ -376,10 +370,10 @@ function render(){
   }
 
   let html='';
-  if(s.view==='login')       html=renderLogin(t,rtl);
+  if(s.view==='login')         html=renderLogin(t,rtl);
   else if(s.view==='employee') html=renderEmployee(t,rtl);
-  else if(s.view==='staff')  html=renderStaff(t,rtl);
-  else                        html=renderAdmin(t,rtl);
+  else if(s.view==='staff')    html=renderStaff(t,rtl);
+  else                          html=renderAdmin(t,rtl);
 
   document.getElementById('app').innerHTML=html;
 }
@@ -417,7 +411,6 @@ function renderLogin(t,rtl){
       ${[
         {r:'employee',em:'👤',lb:t.emp,ds:t.empD},
         {r:'staff',em:'🛎️',lb:t.staff,ds:t.staffD},
-       // {r:'admin',em:'⚙️',lb:t.admin,ds:t.adminD},
       ].map(x=>`
         <div class="role-card" style="margin-bottom:12px" onclick="selectRole('${x.r}')">
           <span style="font-size:36px">${x.em}</span>
@@ -481,6 +474,7 @@ function renderEmployee(t,rtl){
       </div>
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
         <h3 style="font-weight:700;font-size:15px">${t.myOrders}</h3>
+        <button onclick="loadOrders()" style="background:none;border:none;color:var(--acc);font-size:20px;cursor:pointer" title="تحديث">🔄</button>
         ${state.loadingOrders?`<div class="spinner"></div>`:''}
       </div>
       ${myO.length===0?`<div style="text-align:center;padding:40px 0;color:var(--mut)">
@@ -518,7 +512,7 @@ function renderStaff(t,rtl){
       <div class="nav-title">🛎️ ${t.queue}</div>
       <div class="nav-actions">
         ${state.newOrderCount>0?`<div style="position:relative"><span style="font-size:22px">🔔</span><span class="badge new-badge">${state.newOrderCount}</span></div>`:'<span style="font-size:22px;opacity:0.4">🔔</span>'}
-        <button class="icon-btn" onclick="loadOrders()" title="Refresh">🔄</button>
+        <button class="icon-btn" onclick="state.newOrderCount=0;loadOrders()" title="Refresh">🔄</button>
         <button class="icon-btn" onclick="toggleDark()">${state.dark?'☀️':'🌙'}</button>
         <button class="icon-btn" onclick="logout()">🚪</button>
       </div>
@@ -526,7 +520,7 @@ function renderStaff(t,rtl){
     <div class="refresh-bar">
       ${state.loadingOrders
         ? `<div class="spinner" style="width:14px;height:14px;border-width:2px"></div> ${t.loadingOrders}`
-        : `🔄 ${t.refreshIn} • ${lastR}`}
+        : `🔄 ${t.refreshIn} (15s) • آخر تحديث: ${lastR}`}
     </div>
     <div style="padding:16px;display:grid;grid-template-columns:repeat(3,1fr);gap:10px">
       ${[{lb:t.pending,count:pend.length,c:'#f59e0b'},{lb:t.preparing,count:prep.length,c:'#3b82f6'},{lb:t.delivered,count:delv.length,c:'#10b981'}].map(x=>`
@@ -547,14 +541,14 @@ function renderStaff(t,rtl){
             if(pr[a.status]!==pr[b.status])return pr[a.status]-pr[b.status];
             return b.ts-a.ts;
           }).map(o=>{
-            const cfg=ORD[o.type];
+            const cfg=ORD[o.type]||ORD.special;
             const isNew=o.status==='pending';
             return `<div class="order-card" style="border-color:${isNew?cfg.brd:'var(--brd)'};border-${rtl?'right':'left'}:4px solid ${cfg.acc}">
               <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:14px">
                 <div style="display:flex;align-items:center;gap:12px">
                   <span style="font-size:36px">${cfg.em}</span>
                   <div>
-                    <div style="font-weight:800;font-size:17px;color:${cfg.acc}">${t[cfg.lk]}</div>
+                    <div style="font-weight:800;font-size:17px;color:${cfg.acc}">${t[cfg.lk]||o.type}</div>
                     <div style="color:var(--mut);font-size:13px;margin-top:2px">👤 ${o.empName} &nbsp;•&nbsp; 🏢 ${o.dept}</div>
                     ${o.note?`<div style="color:var(--acc2);font-size:12px;margin-top:4px">📝 ${o.note}</div>`:''}
                   </div>
@@ -584,7 +578,6 @@ function renderAdmin(t,rtl){
   const pieColors={tea:'#10b981',coffee:'#f59e0b',water:'#60a5fa',special:'#a855f7'};
   const maxBar=Math.max(...CHART_VALS);
 
-  // توزيع الطلبات الحقيقية
   const realTotals={tea:0,coffee:0,water:0,special:0};
   state.orders.forEach(o=>{ if(realTotals[o.type]!==undefined) realTotals[o.type]++; });
   const totalReal=Object.values(realTotals).reduce((a,b)=>a+b,0)||1;
@@ -624,7 +617,7 @@ function renderAdmin(t,rtl){
           <svg width="120" height="120" viewBox="0 0 120 120">
             ${(()=>{let a=0,segs='';pieData.forEach(({k,v})=>{const r=52,cx=60,cy=60,sa=a*Math.PI/180,ea=(a+v*3.6)*Math.PI/180;const x1=cx+r*Math.cos(sa),y1=cy+r*Math.sin(sa),x2=cx+r*Math.cos(ea),y2=cy+r*Math.sin(ea);segs+=`<path d="M${cx},${cy} L${x1.toFixed(1)},${y1.toFixed(1)} A${r},${r} 0 ${v*3.6>180?1:0},1 ${x2.toFixed(1)},${y2.toFixed(1)} Z" fill="${pieColors[k]}" opacity="0.9"/>`;a+=v*3.6;});return segs;})()}
             <circle cx="60" cy="60" r="32" fill="var(--card)"/>
-            <text x="60" y="65" text-anchor="middle" fill="var(--txt)" font-size="14" font-weight="700" font-family="Cairo">${totalToday}</text>
+            <text x="60" y="65" text-anchor="middle" fill="var(--txt)" font-size="14" font-weight="700" font-family="Cairo">${totalReal}</text>
           </svg>
           <div style="flex:1;display:flex;flex-direction:column;gap:10px">
             ${pieData.map(({k,v})=>`
@@ -723,7 +716,6 @@ function renderAdmin(t,rtl){
     `;
   }
   else {
-    // Reports
     content=`
       <div class="card" style="margin-bottom:16px">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
@@ -753,7 +745,7 @@ function renderAdmin(t,rtl){
             ${state.orders.slice(0,20).map(o=>`
               <div style="display:flex;justify-content:space-between;align-items:center;padding:10px 0;border-bottom:1px solid var(--brd)">
                 <div style="display:flex;align-items:center;gap:10px">
-                  <span style="font-size:24px">${ORD[o.type].em}</span>
+                  <span style="font-size:24px">${(ORD[o.type]||ORD.special).em}</span>
                   <div>
                     <div style="font-size:14px;font-weight:600">${o.empName}</div>
                     <div style="font-size:11px;color:var(--mut)">${o.dept}</div>
@@ -789,7 +781,7 @@ function renderAdmin(t,rtl){
 }
 
 // ============================================================
-//  EVENT HANDLERS  (async)
+//  EVENT HANDLERS
 // ============================================================
 function setLang(l){state.lang=l;render();}
 function toggleDark(){state.dark=!state.dark;render();}
@@ -842,13 +834,14 @@ async function doLogin(){
 
 async function placeOrder(type){
   const e=state.employees.find(x=>String(x.id)===String(state.loginEmpId))||state.user;
+  const orderId = Date.now();
   const order={
-    id:Date.now(), type,
+    id:orderId, type,
     empName:e?.name||'',
     dept:e?.dept||'',
     note:state.note,
     status:'pending',
-    ts:Date.now(),
+    ts:orderId,
     priority:false,
     date:todayStr()
   };
@@ -861,14 +854,25 @@ async function placeOrder(type){
   render();
   setTimeout(()=>{state.showSuccess=false;render();},3000);
 
-  // Save to GAS
+  // ✅ إرسال عبر GET بدلاً من POST no-cors
   try {
     state.saving=true;
-    await gasPost({action:'addOrder',...order});
+    await gasAction('addOrder', {
+      id:     orderId,
+      type:   type,
+      empName: e?.name||'',
+      dept:   e?.dept||'',
+      note:   state.note||'',
+      ts:     orderId,
+      date:   todayStr()
+    });
+    // بعد الحفظ، أعد تحميل الطلبات للتأكد
+    await loadOrders();
   } catch(err){
     console.error('placeOrder:', err);
   } finally {
     state.saving=false;
+    render();
   }
 }
 
@@ -880,7 +884,8 @@ async function setStatus(id, status){
   }
   render();
   try {
-    await gasPost({action:'updateOrder', id, status});
+    // ✅ إرسال عبر GET
+    await gasAction('updateOrder', {id: String(id), status});
   } catch(err){ console.error('setStatus:', err); }
 }
 
@@ -889,7 +894,7 @@ async function togglePriority(id){
   if(o) o.priority=!o.priority;
   render();
   try {
-    await gasPost({action:'updateOrder', id, priority: o?.priority||false});
+    await gasAction('updateOrder', {id: String(id), priority: String(o?.priority||false)});
   } catch(err){ console.error('togglePriority:', err); }
 }
 
@@ -897,22 +902,23 @@ async function addEmployee(){
   const n=state.newEmpName.trim(), d=state.newEmpDept;
   if(!n||!d) return;
   const av=n.split(' ').map(w=>w[0]).slice(0,2).join('').toUpperCase();
-  const emp={id:Date.now(), name:n, nameEn:n, dept:d, av, req:0};
+  const empId=Date.now();
+  const emp={id:empId, name:n, nameEn:n, dept:d, av, req:0};
   state.employees.push(emp);
   state.newEmpName='';state.newEmpDept='';
   render();
   try {
     state.saving=true;
-    await gasPost({action:'addEmployee',...emp});
+    await gasAction('addEmployee', {id:empId, name:n, nameEn:n, dept:d, av});
   } catch(err){ console.error('addEmployee:', err); }
-  finally { state.saving=false; }
+  finally { state.saving=false; render(); }
 }
 
 async function delEmployee(id){
   state.employees=state.employees.filter(e=>String(e.id)!==String(id));
   render();
   try {
-    await gasPost({action:'deleteEmployee', id});
+    await gasAction('deleteEmployee', {id: String(id)});
   } catch(err){ console.error('delEmployee:', err); }
 }
 
@@ -924,9 +930,9 @@ async function addDept(){
   render();
   try {
     state.saving=true;
-    await gasPost({action:'addDept', name:n});
+    await gasAction('addDept', {name:n});
   } catch(err){ console.error('addDept:', err); }
-  finally { state.saving=false; }
+  finally { state.saving=false; render(); }
 }
 
 async function delDept(name){
@@ -934,11 +940,10 @@ async function delDept(name){
   state.employees=state.employees.map(e=>e.dept===name?{...e,dept:''}:e);
   render();
   try {
-    await gasPost({action:'deleteDept', name});
+    await gasAction('deleteDept', {name});
   } catch(err){ console.error('delDept:', err); }
 }
 
-// تصدير CSV
 function exportCSV(){
   const rows=[['الاسم','القسم','النوع','الملاحظة','الحالة','الوقت']];
   state.orders.forEach(o=>{
