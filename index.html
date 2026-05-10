@@ -77,7 +77,7 @@ button:active{transform:scale(0.96)}
 // ============================================================
 //  ⚙️  ضع هنا رابط Google Apps Script بعد النشر (Deploy)
 // ============================================================
-const GAS_URL = 'https://script.google.com/macros/s/AKfycbwgWEUXYG5RXgX6x8aNyTy78GWay9vUR9Q7y6lKBd9-64l0fGLHFaMmrQmzK4FI2VoOiw/exec';
+const GAS_URL = 'https://script.google.com/macros/s/AKfycbzKeMF6xB9gfZwpkgw0rCeSjXw3A-KngzCwyRwqnqzbe2azxVJv4OJht11JTLO8BNOY4g/exec';
 // ============================================================
 
 // ===== STATE =====
@@ -222,13 +222,53 @@ async function gasGet(action, params={}) {
 }
 
 async function gasPost(data) {
-  const res = await fetch(GAS_URL, {
+  // GAS يتطلب no-cors + text/plain لتجنب preflight
+  await fetch(GAS_URL, {
     method: 'POST',
-    headers: {'Content-Type':'application/json'},
+    mode: 'no-cors',
+    headers: {'Content-Type': 'text/plain;charset=utf-8'},
     body: JSON.stringify(data)
   });
-  if (!res.ok) throw new Error('HTTP ' + res.status);
-  return res.json();
+  return { ok: true };
+}
+
+// ============================================================
+//  SESSION — حفظ واستعادة الجلسة عبر localStorage
+// ============================================================
+function saveSession() {
+  try {
+    localStorage.setItem('orderSys_session', JSON.stringify({
+      view:       state.view,
+      user:       state.user,
+      loginEmpId: state.loginEmpId
+    }));
+  } catch(e) {}
+}
+
+function clearSession() {
+  try { localStorage.removeItem('orderSys_session'); } catch(e) {}
+}
+
+function restoreSession() {
+  try {
+    const raw = localStorage.getItem('orderSys_session');
+    if (!raw) return;
+    const s = JSON.parse(raw);
+    // تحقق أن المستخدم المحفوظ لا يزال موجوداً في قائمة الموظفين
+    if (s.view === 'employee') {
+      const emp = state.employees.find(x => String(x.id) === String(s.loginEmpId));
+      if (!emp) return; // الموظف حُذف → ارجع للوجين
+      state.view       = 'employee';
+      state.user       = { ...emp, role: 'employee' };
+      state.loginEmpId = s.loginEmpId;
+    } else if (s.view === 'staff') {
+      state.view = 'staff';
+      state.user = s.user || { name: 'موظف الخدمة', role: 'staff' };
+    } else if (s.view === 'admin') {
+      state.view = 'admin';
+      state.user = s.user || { name: 'المدير', role: 'admin' };
+    }
+  } catch(e) {}
 }
 
 // تحميل الموظفين والأقسام عند بدء التطبيق
@@ -243,6 +283,23 @@ async function loadInitialData() {
     ]);
     if (Array.isArray(emps)) state.employees = emps;
     if (Array.isArray(depts)) state.depts = depts;
+
+    // استعادة الجلسة المحفوظة
+    restoreSession();
+
+    // تحميل الطلبات حسب الدور المستعاد
+    if (state.view === 'staff') {
+      state.loading = false;
+      render();
+      await loadOrders();
+      startAutoRefresh();
+      return;
+    } else if (state.view === 'employee' || state.view === 'admin') {
+      state.loading = false;
+      render();
+      await loadOrders();
+      return;
+    }
   } catch(e) {
     console.error('loadInitialData:', e);
     state.gasError = e.message;
@@ -745,6 +802,7 @@ function selectEmp(id){state.loginEmpId=id;render();}
 
 function logout(){
   stopAutoRefresh();
+  clearSession();
   state.view='login';state.user=null;state.loginRole=null;
   state.loginEmpId=null;state.newOrderCount=0;state.orders=[];
   state.lastRefresh=null;state.gasError=null;
@@ -755,12 +813,14 @@ async function selectRole(r){
   if(r==='staff'){
     state.user={name:'موظف الخدمة',role:'staff'};
     state.view='staff';
+    saveSession();
     render();
     await loadOrders();
     startAutoRefresh();
   } else if(r==='admin'){
     state.user={name:'المدير',role:'admin'};
     state.view='admin';
+    saveSession();
     render();
     await loadOrders();
   } else {
@@ -775,6 +835,7 @@ async function doLogin(){
   if(!e) return;
   state.user={...e,role:'employee'};
   state.view='employee';
+  saveSession();
   render();
   await loadOrders();
 }
